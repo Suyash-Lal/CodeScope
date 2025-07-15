@@ -1,7 +1,7 @@
 {
   "name": "codescope",
   "displayName": "CodeScope",
-  "description": "",
+  "description": "Semantic code search tool that uses natural language queries to find functions, classes, and methods across your codebase",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.102.0"
@@ -14,8 +14,19 @@
   "contributes": {
     "commands": [
       {
-        "command": "codescope.helloWorld",
-        "title": "Hello World"
+        "command": "codescope.search",
+        "title": "CodeScope: Search Code"
+      },
+      {
+        "command": "codescope.refresh",
+        "title": "CodeScope: Refresh Index"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codescope.search",
+        "key": "ctrl+shift+f",
+        "mac": "cmd+shift+f"
       }
     ]
   },
@@ -32,6 +43,9 @@
     "check-types": "tsc --noEmit",
     "lint": "eslint src",
     "test": "vscode-test"
+  },
+  "dependencies": {
+    "typescript": "^5.8.3"
   },
   "devDependencies": {
     "@types/vscode": "^1.102.0",
