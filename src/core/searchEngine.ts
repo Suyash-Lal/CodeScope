@@ -1,4 +1,4 @@
-import { CodeElement, SearchQuery, SearchResult, SearchOptions, ElementType } from '../types';
+import { CodeElement, SearchQuery, SearchResult, SearchOptions, ElementType, QueryIntent } from '../types';
 
 export class SearchEngine {
   private elements: CodeElement[] = [];
@@ -14,7 +14,7 @@ export class SearchEngine {
   public search(query: SearchQuery, options: SearchOptions = {}): SearchResult[] {
     const {
       maxResults = 50,
-      threshold = 0.1,
+      threshold = 0.2, // Increased threshold to filter out low-quality results
       includeSnippets = true,
       caseSensitive = false,
       languages = [],
@@ -66,104 +66,91 @@ export class SearchEngine {
       .slice(0, maxResults);
   }
 
+  /**
+   * Calculates the relevance score for a code element against a search query.
+   * This new algorithm prioritizes completeness (matching all keywords) and the location of matches.
+   */
   private calculateScore(element: CodeElement, query: SearchQuery, caseSensitive: boolean): number {
-    let score = 0;
     const normalize = (text: string) => caseSensitive ? text : text.toLowerCase();
+    const keywords = [...new Set(query.keywords)]; // Use unique keywords from the query
+
+    if (keywords.length === 0) return 0;
+
+    let baseScore = 0;
+    let matchedKeywordsCount = 0;
 
     const elementName = normalize(element.name);
-    const elementDescription = normalize(element.description || '');
-    const elementContext = normalize(element.context || '');
     const elementSignature = normalize(element.signature || '');
+    const elementDescription = normalize(element.description || '');
 
-    for (const keyword of query.keywords) {
-      const normalizedKeyword = normalize(keyword);
-      
-      if (elementName.includes(normalizedKeyword)) {
-        score += this.getNameMatchScore(elementName, normalizedKeyword);
-      }
-      
-      if (elementDescription.includes(normalizedKeyword)) {
-        score += 0.3;
-      }
-      
-      if (elementSignature.includes(normalizedKeyword)) {
-        score += 0.4;
-      }
-      
-      if (elementContext.includes(normalizedKeyword)) {
-        score += 0.1;
-      }
-
-      if (element.parameters) {
-        for (const param of element.parameters) {
-          if (normalize(param.name).includes(normalizedKeyword)) {
-            score += 0.2;
-          }
-          if (param.type && normalize(param.type).includes(normalizedKeyword)) {
-            score += 0.15;
-          }
+    // For each keyword, find the best possible match location and score it.
+    for (const keyword of keywords) {
+        const normalizedKeyword = normalize(keyword);
+        let keywordFound = false;
+        
+        // Check in order of importance: Name > Signature > Description
+        if (elementName.includes(normalizedKeyword)) {
+            baseScore += 1.5 * this.getNameMatchScore(elementName, normalizedKeyword);
+            keywordFound = true;
+        } else if (elementSignature.includes(normalizedKeyword)) {
+            baseScore += 0.6;
+            keywordFound = true;
+        } else if (elementDescription.includes(normalizedKeyword)) {
+            baseScore += 0.3;
+            keywordFound = true;
         }
-      }
+        
+        if (keywordFound) {
+            matchedKeywordsCount++;
+        }
     }
 
-    score += this.getTypeMatchScore(element.type, query.elementTypes);
-    score += this.getSemanticScore(element, query);
+    if (matchedKeywordsCount === 0) {
+        return 0;
+    }
+    
+    // --- The Core Improvement ---
+    // Calculate a "completeness factor". This heavily penalizes partial matches.
+    const completenessFactor = matchedKeywordsCount / keywords.length;
 
-    return Math.min(score, 1.0);
+    // If a result matches less than half the keywords, it's probably not relevant.
+    // This is a powerful filter for multi-word queries.
+    if (keywords.length > 1 && completenessFactor < 0.5) {
+        return 0;
+    }
+
+    // Use the completeness factor as a multiplier. Squaring it gives exponentially
+    // more weight to results that are more complete.
+    // e.g., 100% complete = 1.0 multiplier, 50% complete = 0.25 multiplier.
+    let finalScore = baseScore * (completenessFactor * completenessFactor);
+
+    // Add a small bonus for matching the precise element type the user asked for.
+    if (query.intent === QueryIntent.FIND_FUNCTIONS && element.type === ElementType.FUNCTION) {
+        finalScore += 0.2; // Bonus for a pure function when "function" was specified
+    } else if (query.elementTypes.includes(element.type)) {
+        finalScore += 0.1; // Smaller bonus for a related type (e.g., a method)
+    }
+    
+    // Normalize the score to be roughly between 0 and 1
+    const maxPossibleScore = (keywords.length * 1.5 * 1.5) + 0.2; // A rough upper bound
+    return Math.min(finalScore / maxPossibleScore, 1.0);
   }
 
+  /**
+   * Provides a score based on how well the keyword matches the element's name.
+   * Exact and prefix matches are scored higher.
+   */
   private getNameMatchScore(elementName: string, keyword: string): number {
-    if (elementName === keyword) {return 1.0;}
-    if (elementName.startsWith(keyword)) {return 0.8;}
-    if (elementName.endsWith(keyword)) {return 0.6;}
-    if (elementName.includes(keyword)) {return 0.4;}
-    return 0;
-  }
-
-  private getTypeMatchScore(elementType: ElementType, queryTypes: ElementType[]): number {
-    if (queryTypes.includes(elementType)) {
-      return 0.2;
-    }
+    if (elementName === keyword) return 1.5;      // Boost for exact match
+    if (elementName.startsWith(keyword)) return 1.2; // Boost for prefix match
+    if (elementName.endsWith(keyword)) return 0.8;
+    if (elementName.includes(keyword)) return 0.6; // A simple containment is worth less
     return 0;
   }
 
   private getSemanticScore(element: CodeElement, query: SearchQuery): number {
-    let score = 0;
-    
-    const actionKeywords = [
-      'handle', 'process', 'manage', 'deal', 'send', 'receive',
-      'create', 'delete', 'update', 'get', 'set', 'validate',
-      'authenticate', 'authorize', 'connect', 'parse', 'format',
-      'calculate', 'compute', 'render', 'display', 'show'
-    ];
-
-    const domainKeywords = [
-      'database', 'auth', 'user', 'email', 'file', 'api',
-      'validation', 'error', 'config', 'log', 'test', 'service'
-    ];
-
-    for (const keyword of query.keywords) {
-      if (actionKeywords.includes(keyword)) {
-        if (element.name.toLowerCase().includes(keyword)) {
-          score += 0.3;
-        }
-      }
-      
-      if (domainKeywords.includes(keyword)) {
-        if (element.name.toLowerCase().includes(keyword) ||
-            element.description?.toLowerCase().includes(keyword)) {
-          score += 0.2;
-        }
-      }
-    }
-
-    if (element.type === ElementType.FUNCTION || element.type === ElementType.METHOD) {
-      if (query.keywords.some(k => element.name.toLowerCase().includes(k))) {
-        score += 0.1;
-      }
-    }
-
-    return score;
+    // This can be further improved later, but for now, the main scoring logic is more important.
+    return 0;
   }
 
   private getMatchedKeywords(element: CodeElement, keywords: string[], caseSensitive: boolean): string[] {
@@ -174,7 +161,6 @@ export class SearchEngine {
       element.name,
       element.description || '',
       element.signature || '',
-      element.context || '',
       ...(element.parameters?.map(p => p.name) || [])
     ].join(' ');
 
@@ -190,62 +176,22 @@ export class SearchEngine {
   }
 
   private getRelevanceReason(element: CodeElement, query: SearchQuery, matchedKeywords: string[]): string {
-    const reasons: string[] = [];
-
-    if (matchedKeywords.length > 0) {
-      reasons.push(`Matches keywords: ${matchedKeywords.join(', ')}`);
+    if (matchedKeywords.length === 0) {
+      return 'General relevance match';
     }
-
-    if (query.elementTypes.includes(element.type)) {
-      reasons.push(`Matches requested type: ${element.type}`);
-    }
-
-    if (element.name.toLowerCase().includes(query.text.toLowerCase())) {
-      reasons.push('Name contains query text');
-    }
-
-    if (element.description && element.description.toLowerCase().includes(query.text.toLowerCase())) {
-      reasons.push('Description contains query text');
-    }
-
-    return reasons.join('; ') || 'General relevance match';
+    const totalKeywords = new Set(query.keywords).size;
+    const reason = `Matches ${matchedKeywords.length} of ${totalKeywords} keywords: ${matchedKeywords.join(', ')}`;
+    return reason;
   }
 
   private generateSnippet(element: CodeElement): string {
     const lines: string[] = [];
     
     if (element.description) {
-      lines.push(`// ${element.description}`);
+      const summary = element.description.split('\n')[0];
+      lines.push(`// ${summary}`);
     }
-
-    switch (element.type) {
-      case ElementType.FUNCTION:
-        lines.push(element.signature || `function ${element.name}()`);
-        break;
-      case ElementType.CLASS:
-        lines.push(`class ${element.name}`);
-        break;
-      case ElementType.METHOD:
-        lines.push(element.signature || `${element.name}()`);
-        break;
-      case ElementType.PROPERTY:
-        lines.push(`${element.name}: ${element.returnType || 'any'}`);
-        break;
-      case ElementType.VARIABLE:
-        lines.push(`${element.name}: ${element.returnType || 'any'}`);
-        break;
-      case ElementType.INTERFACE:
-        lines.push(`interface ${element.name}`);
-        break;
-      case ElementType.TYPE:
-        lines.push(`type ${element.name}`);
-        break;
-      case ElementType.ENUM:
-        lines.push(`enum ${element.name}`);
-        break;
-      default:
-        lines.push(element.name);
-    }
+    lines.push(element.signature || `${element.name}`);
 
     return lines.join('\n');
   }
